@@ -2,8 +2,7 @@
 declare(strict_types=1);
 
 /*
- * Set this to the public URL of the project directory, without trailing slash.
- * Example: https://example.com/qr_barcode_api
+ * Set to your own base url
  */
 const BASE_URL = 'https://example.com/qr_barcode_api';
 const MAX_VALUE_LENGTH = 2048;
