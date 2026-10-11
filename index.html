@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QR & Barcode Generator</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+    body { max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #17202a; }
+    h1 { margin-bottom: .35rem; }
+    .muted { color: #5d6875; }
+    form, .result { border: 1px solid #d8dee5; border-radius: 14px; padding: 1.2rem; margin-top: 1.2rem; }
+    label { display: block; font-weight: 600; margin: .85rem 0 .35rem; }
+    input, select, button { font: inherit; padding: .7rem; border-radius: 8px; }
+    input, select { width: 100%; box-sizing: border-box; border: 1px solid #aeb8c2; }
+    button { border: 0; background: #17202a; color: white; cursor: pointer; margin-top: 1rem; }
+    button:disabled { opacity: .6; cursor: wait; }
+    #preview { margin-top: 1rem; overflow-wrap: anywhere; }
+    #preview img, #preview svg { max-width: 100%; height: auto; }
+    .error { color: #a61b1b; }
+    code { overflow-wrap: anywhere; }
+  </style>
+  <!-- Browser-side generators loaded from CDN; no library files to download or upload. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+</head>
+<body>
+  <h1>QR & Barcode Generator</h1>
+  <p class="muted">Generate in your browser, save the image to the PHP server, and receive a public image URL.</p>
+
+  <form id="generator">
+    <label for="type">Image type</label>
+    <select id="type" name="type">
+      <option value="qr">QR Code (PNG)</option>
+      <option value="barcode">Code 128 Barcode (SVG)</option>
+    </select>
+
+    <label for="value">Value to encode</label>
+    <input id="value" name="value" maxlength="2048" required placeholder="e.g. PROD-2026-0001">
+
+    <button id="submit" type="submit">Generate and save image</button>
+    <p id="status" class="muted" role="status"></p>
+  </form>
+
+  <section id="result" class="result" hidden>
+    <h2>Generated image</h2>
+    <div id="preview"></div>
+    <p>Image URL: <a id="imageUrl" href="#" target="_blank" rel="noopener"></a></p>
+    <button id="copyUrl" type="button">Copy image URL</button>
+  </section>
+
+  <!-- Hidden generation targets -->
+  <div id="qrWork" style="position:absolute;left:-10000px;top:-10000px"></div>
+  <svg id="barcodeWork" xmlns="http://www.w3.org/2000/svg" style="position:absolute;left:-10000px;top:-10000px"></svg>
+
+<script>
+(() => {
+  const form = document.getElementById('generator');
+  const typeEl = document.getElementById('type');
+  const valueEl = document.getElementById('value');
+  const submit = document.getElementById('submit');
+  const status = document.getElementById('status');
+  const result = document.getElementById('result');
+  const preview = document.getElementById('preview');
+  const imageUrl = document.getElementById('imageUrl');
+  const qrWork = document.getElementById('qrWork');
+  const barcodeWork = document.getElementById('barcodeWork');
+
+  function makeQrDataUrl(value) {
+    qrWork.replaceChildren();
+    return new Promise((resolve, reject) => {
+      try {
+        new QRCode(qrWork, {
+          text: value,
+          width: 300,
+          height: 300,
+          colorDark: '#000000',
+          colorLight: '#ffffff',
+          correctLevel: QRCode.CorrectLevel.M
+        });
+        // QRCode.js renders a canvas and an img; wait a tick for canvas to exist.
+        requestAnimationFrame(() => {
+          const canvas = qrWork.querySelector('canvas');
+          if (canvas) return resolve(canvas.toDataURL('image/png'));
+          const img = qrWork.querySelector('img');
+          if (img && img.src) return resolve(img.src);
+          reject(new Error('QR code could not be rendered by QRCode.js.'));
+        });
+      } catch (e) { reject(e); }
+    });
+  }
+
+  function makeBarcodeSvg(value) {
+    if (!/^[\x20-\x7E]+$/.test(value)) {
+      throw new Error('Code 128 values must contain printable ASCII characters only.');
+    }
+    // 50px bar height, approximately half a 100px sample. Width stays at 2.
+    JsBarcode(barcodeWork, value, {
+      format: 'CODE128',
+      height: 50,
+      width: 2,
+      displayValue: true,
+      margin: 5,
+      background: '#ffffff',
+      lineColor: '#000000'
+    });
+    return new XMLSerializer().serializeToString(barcodeWork);
+  }
+
+  async function postImage(payload) {
+    const response = await fetch('api/save-image.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.success) {
+      throw new Error(data.message || `Server returned HTTP ${response.status}.`);
+    }
+    return data;
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const type = typeEl.value;
+    const value = valueEl.value.trim();
+    if (!value) return;
+    if (value.length > 2048) {
+      status.textContent = 'Value is too long.';
+      status.className = 'error';
+      return;
+    }
+
+    submit.disabled = true;
+    status.className = 'muted';
+    status.textContent = 'Generating image and saving it to the server…';
+    result.hidden = true;
+    preview.replaceChildren();
+
+    try {
+      let payload;
+      if (type === 'qr') {
+        const dataUrl = await makeQrDataUrl(value);
+        payload = { type, value, image_data: dataUrl };
+      } else {
+        payload = { type, value, image_data: makeBarcodeSvg(value) };
+      }
+
+      const saved = await postImage(payload);
+      if (type === 'qr') {
+        const img = document.createElement('img');
+        img.src = saved.image_url;
+        img.alt = 'Generated QR code';
+        preview.appendChild(img);
+      } else {
+        const link = document.createElement('a');
+        link.href = saved.image_url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = 'Open saved barcode SVG';
+        preview.appendChild(link);
+      }
+      imageUrl.href = saved.image_url;
+      imageUrl.textContent = saved.image_url;
+      result.hidden = false;
+      status.textContent = 'Image saved successfully.';
+    } catch (error) {
+      status.className = 'error';
+      status.textContent = error.message || 'Generation failed.';
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  document.getElementById('copyUrl').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(imageUrl.href);
+      status.className = 'muted';
+      status.textContent = 'Image URL copied.';
+    } catch (_) {
+      status.className = 'error';
+      status.textContent = 'Could not access clipboard. Copy the URL manually.';
+    }
+  });
+})();
+</script>
+</body>
+</html>
